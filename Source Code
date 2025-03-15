@@ -1,0 +1,557 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <WiFiManager.h>
+#include <HTTPClient.h>
+#include <DS1302.h>  // ไลบรารี DS1302 RTC
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ESP32Servo.h>  // ไลบรารีสำหรับควบคุม Servo
+
+// **ประกาศ Function Prototype**
+void handleSwitchPress();
+void increaseTemp();
+void decreaseTemp();
+
+// กำหนดที่อยู่ I2C ของจอ LCD
+#define I2C_ADDR 0x27
+LiquidCrystal_I2C lcd(I2C_ADDR, 20, 4);
+
+// RTC Object (ใช้ขา CE, DAT, CLK)
+#define CE_PIN 2
+#define DAT_PIN 4
+#define CLK_PIN 5
+DS1302 rtc(CE_PIN, DAT_PIN, CLK_PIN);
+
+// กำหนดพินที่เชื่อมต่อ DHT22
+#define DHTPIN1 14   
+#define DHTPIN2 27  
+#define DHTTYPE DHT22
+DHT dht1(DHTPIN1, DHTTYPE);
+DHT dht2(DHTPIN2, DHTTYPE);
+
+// กำหนดพินสำหรับปุ่มกด
+#define SWITCH_PIN 16  
+#define TEMP_UP_PIN 17  
+#define TEMP_DOWN_PIN 18 
+#define MODE_PIN 19           // ปุ่มเลือกโหมด (Temp Adj / Work Days)
+#define SELECT_SETTING_PIN 32 // ปุ่มสำหรับเลือกแหล่งค่าจากหน้าอื่นๆ
+
+// กำหนดพิน Ultrasonic Sensor
+#define TRIG_PIN 15
+#define ECHO_PIN 2
+
+// กำหนดพินสำหรับรีเลย์ 1, 2 และ 3
+#define RELAY1_PIN 25  // Active Low
+#define RELAY2_PIN 26  // Active High
+#define RELAY3_PIN 12  // Active High (เลือกใช้ pin 12 เป็นตัวอย่าง)
+#define RELAY4_PIN     // Active LOW ของ มอเตอร์สั่น
+
+// กำหนดพินสำหรับ Servo และสวิตช์ควบคุม Servo
+#define SERVO_PIN 33          // พินสำหรับต่อ Servo
+#define SERVO_SWITCH_PIN 35   // พินสำหรับสวิตช์ควบคุม Servo
+
+Servo myServo;  // สร้างออบเจ็กต์ Servo
+
+// สำหรับควบคุม Servo ด้วย state machine
+enum ServoState { SERVO_IDLE, SERVO_MOVING_TO_180 };
+ServoState myServoState = SERVO_IDLE;
+unsigned long servoStateStartTime = 0;
+const unsigned long SERVO_MOVE_DURATION = 2000; // 2 วินาที
+unsigned long lastServoSwitchTime = 0;
+
+// Global Variables สำหรับเซ็นเซอร์และรีเลย์
+float backupTemperature = 0.0;
+float backupHumidity = 0.0;
+float waterLevelPercent = 0.0;
+bool isAdjustingTemp = true;  // โหมดเริ่มต้นคือปรับอุณหภูมิ
+
+// Global Variables สำหรับแต่ละหน้า (Pages 5-9 สำหรับ Settings)
+float tempAdjustmentFactor5 = 35.0;
+float tempAdjustmentFactor6 = 38.0;
+float tempAdjustmentFactor7 = 37.5;
+float tempAdjustmentFactor8 = 36.5;
+float tempAdjustmentFactor9 = 40.5;
+int operatingDays5 = 30;
+int operatingDays6 = 40;
+int operatingDays7 = 80;
+int operatingDays8 = 35;
+int operatingDays9 = 90;
+
+// ตัวแปรปุ่มกด
+unsigned long lastButtonPress = 0;
+unsigned long lastTempUpPress = 0;
+unsigned long lastTempDownPress = 0;
+unsigned long lastModePress = 0;
+unsigned long lastSettingPress = 0;  // สำหรับ SELECT_SETTING_PIN
+const unsigned long debounceDelay = 250;
+int currentPage = 0; // หน้า 0 ถึง 10 (รวม 11 หน้า)
+
+// สำหรับเลือกแหล่งค่าใน Use Setting (หน้า Use Setting คือ currentPage == 10)
+// ค่าเริ่มต้นเลือกจาก Page 6
+int selectedSettingPage = 6;
+
+WiFiManager wm;
+const char* serverUrl = "http://154.197.124.62/save_data.php";
+
+// Relay timing variables และ state machine สำหรับรีเลย์ (ปั้มน้ำ)
+// เงื่อนไข: เมื่อ backupTemperature > selectedTempAdj ให้
+// รีเลย์ตัวที่ 1 (Active Low) ทำงาน 5 วินาที, ต่อด้วยรีเลย์ตัวที่ 2 (Active High) ทำงาน 1 นาที,
+// จากนั้นรีเลย์ตัวที่ 3 (Active High) ทำงาน 10 วินาที แล้วปิดทั้งหมด
+enum PumpState { PUMP_IDLE, PUMP_RUN_RELAY1, PUMP_RUN_RELAY2, PUMP_RUN_RELAY3 };
+PumpState pumpState = PUMP_IDLE;
+unsigned long pumpStateStartTime = 0;
+const unsigned long RELAY1_DURATION = 60000;    // 5 วินาที
+const unsigned long RELAY2_DURATION = 5000;   // 1 นาที
+const unsigned long RELAY3_DURATION = 10000;   // 10 วินาที
+const unsigned long RELAY4_DURATION = 60000;  //ทำงาน 5 วินาที
+void sendDataToMySQL(float temp, float hum, float waterLevel, String ssid) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    WiFiClient client;
+    String postData = "temperature=" + String(temp) +
+                      "&humidity=" + String(hum) +
+                      "&water_level=" + String(waterLevel) +
+                      "&ssid=" + ssid;
+    http.begin(client, serverUrl);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    int httpResponseCode = http.POST(postData);
+    if (httpResponseCode > 0) {
+      Serial.print("[DEBUG] Data sent successfully! Response code: ");
+      Serial.println(httpResponseCode);
+    } else {
+      Serial.print("[ERROR] Failed to send data! Error code: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  } else {
+    Serial.println("[ERROR] WiFi not connected! Cannot send data.");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n\n[DEBUG] System Booting...");
+
+  // เริ่มต้น I2C (ESP32, SDA = 21, SCL = 22)
+  Wire.begin(21, 22);
+  lcd.begin();
+  lcd.backlight();
+
+  // ตั้งค่าพินสำหรับรีเลย์
+  pinMode(RELAY1_PIN, OUTPUT);
+  digitalWrite(RELAY1_PIN, HIGH);  // Active Low: HIGH = OFF
+  pinMode(RELAY2_PIN, OUTPUT);
+  digitalWrite(RELAY2_PIN, LOW);   // Active High: LOW = OFF
+  pinMode(RELAY3_PIN, OUTPUT);
+  digitalWrite(RELAY3_PIN, HIGH);   // Active High: LOW = OFF
+  pinMode (RELAY4_PIN, OUTPUT);
+  digitalWrite(RELAY4_PIN, HIGH);   // Active LOW: HIGH = OFF 
+
+  // ตั้งค่าพินสำหรับ Servo และสวิตช์ Servo
+  myServo.attach(SERVO_PIN);
+  myServo.write(88);  // ตั้งค่าเริ่มต้น Servo ที่ 88° 
+  pinMode(SERVO_SWITCH_PIN, INPUT_PULLUP);
+
+  dht1.begin();
+  dht2.begin();
+
+  pinMode(SWITCH_PIN, INPUT_PULLUP);
+  pinMode(TEMP_UP_PIN, INPUT_PULLUP);
+  pinMode(TEMP_DOWN_PIN, INPUT_PULLUP);
+  pinMode(MODE_PIN, INPUT_PULLUP);
+  pinMode(SELECT_SETTING_PIN, INPUT_PULLUP);
+
+  Serial.println("[DEBUG] Connecting to WiFi...");
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting WiFi...");
+  if (!wm.autoConnect("ESP-Setup", "12345678")) {
+    Serial.println("[ERROR] WiFi Connection Failed. Restarting...");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Failed...");
+    delay(3000);
+    ESP.restart();
+  }
+  Serial.println("[DEBUG] WiFi Connected!");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi Connected!");
+  delay(2000);
+
+  // เริ่มต้น RTC
+  rtc.halt(false);
+  rtc.writeProtect(false);
+  Serial.println("[DEBUG] Checking RTC connection...]");
+  Time now = rtc.getTime();
+}
+
+unsigned long lastSentTime = 0;
+const unsigned long sendInterval = 30000; // 30 วินาที
+
+void loop() {
+  unsigned long currentMillis = millis();
+  
+  // State machine สำหรับรีเลย์ (ปั้มน้ำ)
+  if (pumpState == PUMP_RUN_RELAY1 && (currentMillis - pumpStateStartTime >= RELAY1_DURATION)) {
+    // ปิดรีเลย์ตัวที่ 1: Active Low => OFF = HIGH
+    digitalWrite(RELAY1_PIN, HIGH);
+    pumpState = PUMP_RUN_RELAY2;
+    pumpStateStartTime = currentMillis;
+    Serial.println("[DEBUG] Relay 1 turned OFF, starting Relay 2.");
+    // เปิดรีเลย์ตัวที่ 2: Active High => ON = HIGH
+    digitalWrite(RELAY2_PIN, HIGH);
+  }
+  if (pumpState == PUMP_RUN_RELAY2 && (currentMillis - pumpStateStartTime >= RELAY2_DURATION)) {
+    // ปิดรีเลย์ตัวที่ 2: Active High => OFF = LOW
+    digitalWrite(RELAY2_PIN, LOW);
+    pumpState = PUMP_RUN_RELAY3;
+    pumpStateStartTime = currentMillis;
+    Serial.println("[DEBUG] Relay 2 turned OFF, starting Relay 3.");
+    // เปิดรีเลย์ตัวที่ 3: Active High => ON = HIGH
+    digitalWrite(RELAY3_PIN, LOW);
+  }
+  if (pumpState == PUMP_RUN_RELAY3 && (currentMillis - pumpStateStartTime >= RELAY3_DURATION)) {
+    // ปิดรีเลย์ตัวที่ 3: Active High => OFF = LOW
+    digitalWrite(RELAY3_PIN, HIGH);
+    pumpState = PUMP_IDLE;
+    Serial.println("[DEBUG] Relay 3 turned OFF, pump cycle finished.");
+  }
+  
+  // ตรวจสอบสวิตช์ Servo
+  if (digitalRead(SERVO_SWITCH_PIN) == LOW && (currentMillis - lastServoSwitchTime > debounceDelay)) {
+    lastServoSwitchTime = currentMillis;
+    // เมื่อกดสวิตช์ ให้สั่ง servo หมุนไปที่ 180° แล้วรอ 1 วินาที จากนั้นกลับไปที่ 88°
+	digitalWrite(RELAY4_PIN, LOW); //มอเตอร์สั่นทำงาน
+    myServo.write(180);
+    Serial.println("[DEBUG] Servo set to 180°");
+    myServoState = SERVO_MOVING_TO_180;
+    servoStateStartTime = currentMillis;
+  }
+  // อัปเดต state ของ Servo แบบ non-blocking
+  if (myServoState == SERVO_MOVING_TO_180 && (currentMillis - servoStateStartTime >= SERVO_MOVE_DURATION)) {
+	//digitalWrite(RELAY3_PIN, HIGH); //มอเตอร์สั่นไม่ทำงาน
+    myServo.write(88);
+    Serial.println("[DEBUG] Servo set to 88°");
+    myServoState = SERVO_IDLE;
+  }
+  
+  // อ่านค่าจาก DHT22
+  float t1 = dht1.readTemperature();
+  float h1 = dht1.readHumidity();
+  float t2 = dht2.readTemperature();
+  float h2 = dht2.readHumidity();
+  if (!isnan(t1) && !isnan(h1) && !isnan(t2) && !isnan(h2)) {
+    backupTemperature = (t1 + t2) / 2.0;
+    backupHumidity = (h1 + h2) / 2.0;
+  }
+  
+  waterLevelPercent = measureWaterLevel();
+  
+  if (currentMillis - lastSentTime > sendInterval) {
+    lastSentTime = currentMillis;
+    Serial.println("[DEBUG] Sending data to MySQL...");
+    sendDataToMySQL(backupTemperature, backupHumidity, waterLevelPercent, WiFi.SSID());
+  }
+  
+  // เปลี่ยนหน้าจอ (0-10)
+  if (digitalRead(SWITCH_PIN) == LOW && (currentMillis - lastButtonPress > debounceDelay)) {
+    lastButtonPress = currentMillis;
+    currentPage = (currentPage + 1) % 11;
+    lcd.clear();
+    Serial.print("[DEBUG] Page changed to: ");
+    Serial.println(currentPage);
+  }
+  
+  if (digitalRead(MODE_PIN) == LOW && (currentMillis - lastModePress > debounceDelay)) {
+    lastModePress = currentMillis;
+    isAdjustingTemp = !isAdjustingTemp;
+    lcd.clear();
+    Serial.print("[DEBUG] Mode switched to: ");
+    Serial.println(isAdjustingTemp ? "Temperature Adjustment" : "Operating Days");
+  }
+  
+  // สำหรับหน้าตั้งค่า (Page 6-10: currentPage 5-9)
+  if (currentPage >= 5 && currentPage <= 9) {
+    if (digitalRead(TEMP_UP_PIN) == LOW && (currentMillis - lastTempUpPress > debounceDelay)) {
+      lastTempUpPress = currentMillis;
+      if (currentPage == 5) {
+        if (isAdjustingTemp) tempAdjustmentFactor5 += 0.5; else operatingDays5 += 1;
+      } else if (currentPage == 6) {
+        if (isAdjustingTemp) tempAdjustmentFactor6 += 0.5; else operatingDays6 += 1;
+      } else if (currentPage == 7) {
+        if (isAdjustingTemp) tempAdjustmentFactor7 += 0.5; else operatingDays7 += 1;
+      } else if (currentPage == 8) {
+        if (isAdjustingTemp) tempAdjustmentFactor8 += 0.5; else operatingDays8 += 1;
+      } else if (currentPage == 9) {
+        if (isAdjustingTemp) tempAdjustmentFactor9 += 0.5; else operatingDays9 += 1;
+      }
+      lcd.clear();
+      updateLCD();
+    }
+    if (digitalRead(TEMP_DOWN_PIN) == LOW && (currentMillis - lastTempDownPress > debounceDelay)) {
+      lastTempDownPress = currentMillis;
+      if (currentPage == 5) {
+        if (isAdjustingTemp) tempAdjustmentFactor5 -= 0.5; else operatingDays5 -= 1;
+      } else if (currentPage == 6) {
+        if (isAdjustingTemp) tempAdjustmentFactor6 -= 0.5; else operatingDays6 -= 1;
+      } else if (currentPage == 7) {
+        if (isAdjustingTemp) tempAdjustmentFactor7 -= 0.5; else operatingDays7 -= 1;
+      } else if (currentPage == 8) {
+        if (isAdjustingTemp) tempAdjustmentFactor8 -= 0.5; else operatingDays8 -= 1;
+      } else if (currentPage == 9) {
+        if (isAdjustingTemp) tempAdjustmentFactor9 -= 0.5; else operatingDays9 -= 1;
+      }
+      lcd.clear();
+      updateLCD();
+    }
+  }
+  
+  // หน้า Use Setting (currentPage == 10)
+  if (currentPage == 10 && digitalRead(SELECT_SETTING_PIN) == LOW && (currentMillis - lastSettingPress > debounceDelay)) {
+    lastSettingPress = currentMillis;
+    selectedSettingPage++;
+    if (selectedSettingPage > 9) selectedSettingPage = 6;
+    lcd.clear();
+    Serial.print("[DEBUG] Selected setting page changed to: ");
+    Serial.println(selectedSettingPage);
+  }
+  
+  // ในหน้า Use Setting อนุญาตปรับค่าโดยตรงด้วยปุ่ม TEMP_UP/TEMP_DOWN
+  if (currentPage == 10) {
+    if (digitalRead(TEMP_UP_PIN) == LOW && (currentMillis - lastTempUpPress > debounceDelay)) {
+      lastTempUpPress = currentMillis;
+      if (selectedSettingPage == 6) tempAdjustmentFactor6 += 0.5;
+      else if (selectedSettingPage == 7) tempAdjustmentFactor7 += 0.5;
+      else if (selectedSettingPage == 8) tempAdjustmentFactor8 += 0.5;
+      else if (selectedSettingPage == 9) tempAdjustmentFactor9 += 0.5;
+      lcd.clear();
+    }
+    if (digitalRead(TEMP_DOWN_PIN) == LOW && (currentMillis - lastTempDownPress > debounceDelay)) {
+      lastTempDownPress = currentMillis;
+      if (selectedSettingPage == 6) tempAdjustmentFactor6 -= 0.5;
+      else if (selectedSettingPage == 7) tempAdjustmentFactor7 -= 0.5;
+      else if (selectedSettingPage == 8) tempAdjustmentFactor8 -= 0.5;
+      else if (selectedSettingPage == 9) tempAdjustmentFactor9 -= 0.5;
+      lcd.clear();
+    }
+  }
+  
+  updateLCD();
+  delay(100);
+}
+
+void updateLCD() {
+  Time now = rtc.getTime();
+  
+  if (currentPage == 0) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 1: Overview");
+    lcd.setCursor(0, 1);
+    lcd.print("Avg Temp: ");
+    lcd.print(backupTemperature, 1);
+    lcd.print(" C  ");
+    lcd.setCursor(0, 2);
+    lcd.print("Avg Hum: ");
+    lcd.print(backupHumidity, 1);
+    lcd.print(" %  ");
+    lcd.setCursor(0, 3);
+    lcd.print("Water Level: ");
+    lcd.print(waterLevelPercent, 1);
+    lcd.print("%");
+  }
+  else if (currentPage == 1) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 2: WiFi Info");
+    lcd.setCursor(0, 1);
+    lcd.print("SSID: ");
+    lcd.print(WiFi.SSID());
+    lcd.setCursor(0, 2);
+    lcd.print(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
+  }
+  else if (currentPage == 2) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 3: Sensors");
+    lcd.setCursor(0, 1);
+    if (isnan(dht1.readTemperature()) || isnan(dht1.readHumidity()))
+      lcd.print("DHT1: Not Connected");
+    else
+      lcd.print("DHT1: Connected");
+    lcd.setCursor(0, 2);
+    if (isnan(dht2.readTemperature()) || isnan(dht2.readHumidity()))
+      lcd.print("DHT2: Not Connected");
+    else
+      lcd.print("DHT2: Connected");
+  }
+  else if (currentPage == 3) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 4: Status");
+    lcd.setCursor(0, 1);
+    lcd.print("Active");
+  }
+  else if (currentPage == 4) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 5: RTC Time");
+    lcd.setCursor(0, 1);
+    lcd.print("Date: ");
+    lcd.print(now.date);
+    lcd.print('/');
+    lcd.print(now.mon);
+    lcd.print('/');
+    lcd.print(now.year);
+    lcd.setCursor(0, 2);
+    lcd.print("Time: ");
+    lcd.print(now.hour);
+    lcd.print(':');
+    lcd.print(now.min);
+    lcd.print(':');
+    lcd.print(now.sec);
+  }
+  else if (currentPage == 5) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 6: Settings");
+    lcd.setCursor(0, 1);
+    if (isAdjustingTemp) {
+      lcd.print("Temp Adj: ");
+      lcd.print(tempAdjustmentFactor5, 1);
+    } else {
+      lcd.print("Work Days: ");
+      lcd.print(operatingDays5);
+    }
+  }
+  else if (currentPage == 6) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 7: Settings");
+    lcd.setCursor(0, 1);
+    if (isAdjustingTemp) {
+      lcd.print("Temp Adj: ");
+      lcd.print(tempAdjustmentFactor6, 1);
+    } else {
+      lcd.print("Work Days: ");
+      lcd.print(operatingDays6);
+    }
+  }
+  else if (currentPage == 7) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 8: Settings");
+    lcd.setCursor(0, 1);
+    if (isAdjustingTemp) {
+      lcd.print("Temp Adj: ");
+      lcd.print(tempAdjustmentFactor7, 1);
+    } else {
+      lcd.print("Work Days: ");
+      lcd.print(operatingDays7);
+    }
+  }
+  else if (currentPage == 8) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 9: Settings");
+    lcd.setCursor(0, 1);
+    if (isAdjustingTemp) {
+      lcd.print("Temp Adj: ");
+      lcd.print(tempAdjustmentFactor8, 1);
+    } else {
+      lcd.print("Work Days: ");
+      lcd.print(operatingDays8);
+    }
+  }
+  else if (currentPage == 9) {
+    lcd.setCursor(0, 0);
+    lcd.print("Page 10: Settings");
+    lcd.setCursor(0, 1);
+    if (isAdjustingTemp) {
+      lcd.print("Temp Adj: ");
+      lcd.print(tempAdjustmentFactor9, 1);
+    } else {
+      lcd.print("Work Days: ");
+      lcd.print(operatingDays9);
+    }
+  }
+  else if (currentPage == 10) {
+    // หน้า Use Setting: ลิงค์ค่าจากหน้าที่เลือก (6-9) มาเปรียบเทียบกับค่าเฉลี่ยเซ็นเซอร์
+    lcd.setCursor(0, 0);
+    lcd.print("Page 11: Use Setting");
+    
+    float selectedTempAdj;
+    int selectedOperatingDays;
+    if (selectedSettingPage == 6) {
+      selectedTempAdj = tempAdjustmentFactor6;
+      selectedOperatingDays = operatingDays6;
+    } else if (selectedSettingPage == 7) {
+      selectedTempAdj = tempAdjustmentFactor7;
+      selectedOperatingDays = operatingDays7;
+    } else if (selectedSettingPage == 8) {
+      selectedTempAdj = tempAdjustmentFactor8;
+      selectedOperatingDays = operatingDays8;
+    } else if (selectedSettingPage == 9) {
+      selectedTempAdj = tempAdjustmentFactor9;
+      selectedOperatingDays = operatingDays9;
+    }
+    
+    lcd.setCursor(0, 1);
+    lcd.print("From Page: ");
+    lcd.print(selectedSettingPage);
+    
+    lcd.setCursor(0, 2);
+    lcd.print("Temp Adj: ");
+    lcd.print(selectedTempAdj, 1);
+    
+    // เปรียบเทียบ backupTemperature กับ selectedTempAdj
+    lcd.setCursor(0, 3);
+    if (backupTemperature > selectedTempAdj) {
+      lcd.print("Cmp: High ");
+      // เริ่มการทำงานปั้มน้ำ หาก pumpState อยู่ในสถานะ idle
+      if (pumpState == PUMP_IDLE) {
+        pumpState = PUMP_RUN_RELAY1;
+        pumpStateStartTime = millis();
+        // เปิดรีเลย์ตัวที่ 1: Active Low => ON = LOW
+        digitalWrite(RELAY1_PIN, LOW);
+        Serial.println("[DEBUG] Pump: Relay 1 ON (5 sec)");
+      }
+      lcd.print("R1: ");
+      lcd.print((pumpState == PUMP_RUN_RELAY1) ? "ON" : "OFF");
+      lcd.print(" R2: ");
+      lcd.print((pumpState == PUMP_RUN_RELAY2) ? "ON" : "OFF");
+    } else {
+      lcd.print("Cmp: Low  ");
+      // ปิดรีเลย์ทั้งหมด: 
+      // รีเลย์ตัวที่ 1 (active low): OFF = HIGH
+      digitalWrite(RELAY1_PIN, HIGH);
+      // รีเลย์ตัวที่ 2 (active high): OFF = LOW
+      digitalWrite(RELAY2_PIN, LOW);
+      // รีเลย์ตัวที่ 3 (active high): OFF = LOW
+      digitalWrite(RELAY3_PIN, HIGH);
+      pumpState = PUMP_IDLE;
+      lcd.print("R1: OFF, R2: OFF, R3: OFF");
+    }
+  }
+}
+
+float measureWaterLevel() {
+  long duration;
+  float cm;
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(5);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  Serial.print("[DEBUG] Pulse Duration: ");
+  Serial.println(duration);
+  if (duration == 0 || duration > 30000) {
+    Serial.println("[ERROR] Ultrasonic Sensor Timeout or Invalid Reading!");
+    return -1;
+  }
+  cm = duration * 0.034 / 2;
+  float level = (15 - cm) * 100 / (15 - 4);
+  if (level < 0) level = 0;
+  if (level > 100) level = 100;
+  Serial.print("[DEBUG] Ultrasonic Distance: ");
+  Serial.print(cm);
+  Serial.print(" cm, Water Level: ");
+  Serial.print(level);
+  Serial.println(" %");
+  return level;
+}
