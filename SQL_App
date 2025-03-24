@@ -1,0 +1,32 @@
+<?php
+$servername = "localhost";
+$username = "root";
+$password = "";
+$dbname = "fermentation_db";
+
+// สร้างการเชื่อมต่อ
+$conn = new mysqli($servername, $username, $password, $dbname);
+
+// ตรวจสอบการเชื่อมต่อ
+if ($conn->connect_error) {
+    die("Connection failed: " . $conn->connect_error);
+}
+
+// รับข้อมูลจาก Flutter
+$type = $_POST['name'];
+$days = $_POST['date_set'];
+$temperature = $_POST['temperature'];
+$humidity = $_POST['humidity'];
+
+// เพิ่มข้อมูลไปยังฐานข้อมูล
+$sql = "INSERT INTO fermentation (type, days, temperature, humidity, date_set)
+VALUES ('$type', '$days', '$temperature', '$humidity', CURDATE())";
+
+if ($conn->query($sql) === TRUE) {
+    echo "Data added successfully";
+} else {
+    echo "Error: " . $sql . "<br>" . $conn->error;
+}
+
+$conn->close();
+?>
