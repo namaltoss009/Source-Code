@@ -1,0 +1,42 @@
+<?php
+// MySQL database configuration
+$host = 'localhost';  // Hostname ของ MySQL server
+$user = 'username';   // ชื่อผู้ใช้ฐานข้อมูล
+$pass = 'password';   // รหัสผ่านฐานข้อมูล
+$dbname = 'sensor_data';  // ชื่อฐานข้อมูลที่สร้างไว้
+
+// สร้างการเชื่อมต่อ MySQL
+$conn = new mysqli($host, $user, $pass, $dbname);
+
+// ตรวจสอบการเชื่อมต่อ
+if ($conn->connect_error) {
+    die("Connection failed: " . $conn->connect_error);
+}
+
+// รับข้อมูลจาก ESP32 ผ่าน POST
+$data = json_decode(file_get_contents('php://input'), true);
+
+// ตรวจสอบว่าได้รับข้อมูลครบถ้วนหรือไม่
+if (isset($data['temperature']) && isset($data['humidity']) && isset($data['water_level']) && isset($data['ssid'])) {
+    $temperature = $data['temperature'];
+    $humidity = $data['humidity'];
+    $water_level = $data['water_level'];
+    $ssid = $data['ssid'];
+
+    // SQL query เพื่อแทรกข้อมูลลงในตาราง
+    $sql = "INSERT INTO sensor_readings (temperature, humidity, water_level, ssid) 
+            VALUES ('$temperature', '$humidity', '$water_level', '$ssid')";
+
+    // ตรวจสอบและแทรกข้อมูล
+    if ($conn->query($sql) === TRUE) {
+        echo "New record created successfully";
+    } else {
+        echo "Error: " . $sql . "<br>" . $conn->error;
+    }
+} else {
+    echo "Invalid data";
+}
+
+// ปิดการเชื่อมต่อ
+$conn->close();
+?>
