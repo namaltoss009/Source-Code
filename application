@@ -1,0 +1,329 @@
+import 'package:flutter/material.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+
+void main() {
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: MainScreen(),
+    );
+  }
+}
+
+class SensorStatusPage extends StatefulWidget {
+  @override
+  _SensorStatusPageState createState() => _SensorStatusPageState();
+}
+
+class _SensorStatusPageState extends State<SensorStatusPage> {
+  String temperature = "35.8°C";
+  String humidity = "70%";
+  String waterLevel = "88.24%";
+  bool isLoading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('สถานะเซ็นเซอร์'),
+        backgroundColor: Colors.green,
+      ),
+      body: Padding(
+        padding: EdgeInsets.all(16.0),
+        child: Center(
+          child: isLoading
+              ? CircularProgressIndicator() // Show loading indicator while fetching data
+              : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildSensorCard("อุณหภูมิ", temperature, Colors.blue),
+              _buildSensorCard("ความชื้น", humidity, Colors.green),
+              _buildSensorCard("ระดับน้ำ", waterLevel, Colors.deepPurple),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSensorCard(String title, String value, Color color) {
+    return Card(
+      margin: EdgeInsets.only(bottom: 10),
+      elevation: 5,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      child: ListTile(
+        contentPadding: EdgeInsets.all(16),
+        title: Text(
+          title,
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black),
+        ),
+        subtitle: Text(
+          value,
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: color),
+        ),
+      ),
+    );
+  }
+}
+
+class ConnectDevicePage extends StatefulWidget {
+  @override
+  _ConnectDevicePageState createState() => _ConnectDevicePageState();
+}
+
+class _ConnectDevicePageState extends State<ConnectDevicePage> {
+  String ssid = "2.4G_Wifi_Toss";
+  bool isLoading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('การเชื่อมต่ออุปกรณ์'),
+        backgroundColor: Colors.green,
+      ),
+      body: Padding(
+        padding: EdgeInsets.all(16.0),
+        child: Center(
+          child: isLoading
+              ? CircularProgressIndicator() // Show loading indicator while fetching data
+              : Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Card(
+                margin: EdgeInsets.only(bottom: 10),
+                elevation: 5,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                child: ListTile(
+                  contentPadding: EdgeInsets.all(16),
+                  title: Text(
+                    "SSID",
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    ssid,
+                    style: TextStyle(fontSize: 20, color: Colors.blue),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class HistoryPage extends StatefulWidget {
+  @override
+  _HistoryPageState createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  List<Map<String, String>> historyData = [
+    {"date_set": "2024-03-11", "temperature": "35.72°C", "humidity": "60%", "water_level": "75.22%"},
+    {"date_set": "2024-03-12", "temperature": "40.10°C", "humidity": "68%", "water_level": "50.97%"},
+  ];
+
+  bool isLoading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('ดูเมนูย้อนหลัง'),
+        backgroundColor: Colors.green,
+      ),
+      body: Padding(
+        padding: EdgeInsets.all(16.0),
+        child: Center(
+          child: isLoading
+              ? CircularProgressIndicator() // Show loading indicator while fetching data
+              : ListView.builder(
+            itemCount: historyData.length,
+            itemBuilder: (context, index) {
+              var item = historyData[index];
+              return Card(
+                margin: EdgeInsets.only(bottom: 10),
+                elevation: 5,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                child: ListTile(
+                  contentPadding: EdgeInsets.all(16),
+                  title: Text(
+                    "วันที่: ${item['date_set']}",
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  subtitle: Text(
+                    "อุณหภูมิ: ${item['temperature']}, ความชื้น: ${item['humidity']}, ระดับน้ำ: ${item['water_level']}",
+                    style: TextStyle(fontSize: 16),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class MainScreen extends StatefulWidget {
+  @override
+  _MainScreenState createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  int _currentIndex = 0;
+
+  final List<Widget> _pages = [
+    ConnectDevicePage(), // หน้าเชื่อมต่ออุปกรณ์
+    FermentationPage(), // หน้าหมัก
+    SensorStatusPage(), // สถานะเซ็นเซอร์
+    HistoryPage(), // หน้าย้อนหลัง
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: _pages[_currentIndex],
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        onTap: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
+        backgroundColor: Colors.greenAccent,
+        selectedItemColor: Colors.red,
+        unselectedItemColor: Colors.green,
+        items: [
+          BottomNavigationBarItem(icon: Icon(Icons.wifi), label: 'หน้าการเชื่อมต่อ'),
+          BottomNavigationBarItem(icon: Icon(Icons.description), label: 'หน้ารูปแบบการหมัก'),
+          BottomNavigationBarItem(icon: Icon(Icons.calendar_today), label: 'หน้าสถานะเซ็นเซอร์'),
+          BottomNavigationBarItem(icon: Icon(Icons.calendar_today), label: 'หน้าดูข้อมูย้อนหลัง'),
+        ],
+      ),
+    );
+  }
+}
+
+class FermentationPage extends StatefulWidget {
+  @override
+  _FermentationPageState createState() => _FermentationPageState();
+}
+
+class _FermentationPageState extends State<FermentationPage> {
+  List<Map<String, String>> fermentationList = [];
+
+  TextEditingController typeController = TextEditingController();
+  TextEditingController daysController = TextEditingController();
+  TextEditingController tempController = TextEditingController();
+  TextEditingController humidityController = TextEditingController();
+
+  Future<void> sendDataToAPI() async {
+    final response = await http.post(
+      Uri.parse('http://154.197.124.62/api.php'),
+      body: {
+        'temperature': tempController.text,
+        'humidity': humidityController.text,
+        'name': typeController.text,
+        'date_set': daysController.text,
+      },
+    );
+
+    if (response.statusCode == 200) {
+      print('Data sent successfully');
+      setState(() {
+        fermentationList.add({
+          "type": typeController.text,
+          "days": daysController.text,
+          "temp": tempController.text,
+          "humidity": humidityController.text,
+        });
+      });
+    } else {
+      print('Failed to send data: ${response.statusCode}');
+      throw Exception('Failed to add fermentation data');
+    }
+  }
+
+  void _addFermentation() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text("เพิ่มรูปแบบการหมัก"),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(controller: typeController, decoration: InputDecoration(labelText: "รูปแบบการหมัก")),
+                TextFormField(
+                  controller: daysController,
+                  decoration: InputDecoration(labelText: "เวลาในการหมัก (วัน)"),
+                  keyboardType: TextInputType.number,
+                ),
+                TextFormField(
+                  controller: tempController,
+                  decoration: InputDecoration(labelText: "อุณหภูมิ (°C)"),
+                  keyboardType: TextInputType.number,
+                ),
+                TextFormField(
+                  controller: humidityController,
+                  decoration: InputDecoration(labelText: "ความชื้น (RH)"),
+                  keyboardType: TextInputType.number,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(child: Text("ยกเลิก"), onPressed: () => Navigator.pop(context)),
+            TextButton(
+              child: Text("บันทึก"),
+              onPressed: () {
+                sendDataToAPI();
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.green,
+        title: Text("รูปแบบการหมัก"),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.add, size: 50),
+            onPressed: _addFermentation,
+          ),
+        ],
+      ),
+      body: fermentationList.isEmpty
+          ? Center(child: Text("ยังไม่มีข้อมูลการหมัก"))
+          : ListView.builder(
+        itemCount: fermentationList.length,
+        itemBuilder: (context, index) {
+          var item = fermentationList[index];
+          return ListTile(
+            leading: Icon(Icons.description, color: Colors.blue),
+            title: Text("${item["type"]}"),
+            subtitle: Text("หมัก ${item["days"]} วัน | อุณหภูมิ ${item["temp"]}°C | ความชื้น ${item["humidity"]}% RH"),
+          );
+        },
+      ),
+    );
+  }
+}
